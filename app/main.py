@@ -16,6 +16,8 @@ def main() -> None:
     for decision in decisions:
         print(f"ID: {decision['id']} | Accion: {decision['action']} | Prioridad: {decision['priority']}")
         print(f"Resumen: {decision['summary']}")
+        if decision.get("spam_status"):
+            print(f"Spam: {decision['spam_status']}")
         if decision.get("draft_status"):
             print(f"Borrador: {decision['draft_status']}")
         if decision.get("whatsapp_status"):

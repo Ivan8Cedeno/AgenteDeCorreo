@@ -4,4 +4,4 @@ token.json
 token.json_pycache_/
 .pytest_cache/
 .venv/
-*.pyc
+*.pyc  

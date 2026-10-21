@@ -58,7 +58,6 @@ class MailAgent:
         if any(keyword in text for keyword in URGENT_KEYWORDS):
             summary = self.llm_service.summarize(message)
             draft = self.llm_service.build_reply(message, "draft")
-            draft["subject"] = f"RE: {draft['subject']}"
             return {
                 "id": message.get("id", ""),
                 "action": "draft",
@@ -85,10 +84,16 @@ class MailAgent:
             decision = self.classify_message(message)
             results.append(decision)
 
-            if decision["action"] == "draft":
-                response = self.gmail_service.create_draft(
+            if decision["action"] == "spam":
+                decision["spam_status"] = self.gmail_service.mark_as_spam(decision["id"])
+            elif decision["action"] == "draft":
+                response = self.gmail_service.create_reply_draft(
                     subject=decision["draft"]["subject"],
                     body=decision["draft"]["body"],
+                    recipient=message.get("from", ""),
+                    thread_id=message.get("thread_id"),
+                    message_id=message.get("message_id"),
+                    references=message.get("references"),
                 )
                 decision["draft_status"] = response
 

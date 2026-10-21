@@ -1,3 +1,5 @@
+import re
+from email.utils import parseaddr
 from typing import Dict
 
 from app.config import settings
@@ -54,18 +56,21 @@ class LLMService:
 
     def build_reply(self, message: Dict[str, str], action: str) -> Dict[str, str]:
         subject = message.get("subject", "Sin asunto")
-        sender = message.get("from", "remitente")
+        subject = re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", subject, flags=re.IGNORECASE).strip()
+        subject = f"Re: {subject or 'Sin asunto'}"
+        sender_name, _ = parseaddr(message.get("from", ""))
+        greeting = f"Hola {sender_name}," if sender_name else "Hola,"
         if action == "spam":
             return {
-                "subject": f"Re: {subject}",
+                "subject": subject,
                 "body": "Este correo se marcó como spam y no requiere respuesta.",
             }
 
         if action == "draft":
             return {
-                "subject": f"Re: {subject}",
+                "subject": subject,
                 "body": (
-                    f"Estimado/a {sender},\n\n"
+                    f"{greeting}\n\n"
                     "Gracias por su mensaje. He revisado la solicitud y estoy preparando una respuesta.\n"
                     "Quedo atento para cualquier información adicional.\n\n"
                     "Saludos,\n"
@@ -74,6 +79,6 @@ class LLMService:
             }
 
         return {
-            "subject": f"Re: {subject}",
+            "subject": subject,
             "body": "Gracias por su mensaje. Revisaré esta solicitud de inmediato.",
         }

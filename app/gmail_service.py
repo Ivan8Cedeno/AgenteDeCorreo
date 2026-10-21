@@ -10,7 +10,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from app.config import settings
+from app.config import BASE_DIR, settings
 
 
 class GmailService:
@@ -23,6 +23,10 @@ class GmailService:
     def _connect_service(self):
         credentials_path = Path(settings.gmail_credentials_path)
         token_path = Path(settings.gmail_token_path)
+        if not credentials_path.is_absolute():
+            credentials_path = BASE_DIR / credentials_path
+        if not token_path.is_absolute():
+            token_path = BASE_DIR / token_path
 
         if not credentials_path.exists():
             return None
@@ -34,28 +38,35 @@ class GmailService:
         if token_path.exists():
             creds = Credentials.from_authorized_user_file(str(token_path), self.SCOPES)
 
-        if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+
+        if not creds or not creds.valid or not creds.has_scopes(self.SCOPES):
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+                if not creds.valid:
+                    raise RuntimeError("No se pudo renovar la autorización de Gmail.")
+            elif not sys.stdin.isatty():
+                return None
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), self.SCOPES)
                 creds = flow.run_local_server(port=0, open_browser=True)
-                if token_path.parent.exists():
-                    token_path.write_text(creds.to_json(), encoding="utf-8")
+                token_path.parent.mkdir(parents=True, exist_ok=True)
+                token_path.write_text(creds.to_json(), encoding="utf-8")
 
-        try:
-            return build("gmail", "v1", credentials=creds)
-        except Exception:
-            return None
+        return build("gmail", "v1", credentials=creds)
 
     def get_messages(self, max_results: int = 5) -> List[Dict[str, Any]]:
         if self.demo_mode:
             return self._demo_messages()
 
         if self.service is None:
-            return self._demo_messages()
+            raise RuntimeError("Gmail no está conectado; no se procesaron mensajes de ejemplo.")
 
-        result = self.service.users().messages().list(userId="me", maxResults=max_results).execute()
+        result = self.service.users().messages().list(
+            userId="me",
+            q="in:inbox",
+            maxResults=max_results,
+        ).execute()
         messages = result.get("messages", [])
         items: List[Dict[str, Any]] = []
         for item in messages:
@@ -65,7 +76,23 @@ class GmailService:
             subject = next((h["value"] for h in headers if h["name"].lower() == "subject"), "Sin asunto")
             sender = next((h["value"] for h in headers if h["name"].lower() == "from"), "Remitente desconocido")
             body = self._extract_body(payload)
-            items.append({"id": msg["id"], "subject": subject, "from": sender, "body": body})
+            items.append(
+                {
+                    "id": msg["id"],
+                    "thread_id": msg.get("threadId"),
+                    "message_id": next(
+                        (h["value"] for h in headers if h["name"].lower() == "message-id"),
+                        None,
+                    ),
+                    "references": next(
+                        (h["value"] for h in headers if h["name"].lower() == "references"),
+                        None,
+                    ),
+                    "subject": subject,
+                    "from": sender,
+                    "body": body,
+                }
+            )
         return items
 
     def get_spam_count(self) -> Optional[int]:
@@ -107,6 +134,51 @@ class GmailService:
             if not page_token:
                 return count
 
+    def mark_unread_inbox_as_read(self) -> int:
+        """Mark every currently unread inbox message as read and return its count."""
+        if self.demo_mode:
+            raise RuntimeError("La acción de marcar correos requiere Gmail en modo real.")
+        if self.service is None:
+            raise RuntimeError("Gmail no está conectado; no se modificaron correos.")
+
+        message_ids = []
+        page_token = None
+        while True:
+            result = self.service.users().messages().list(
+                userId="me",
+                labelIds=["INBOX", "UNREAD"],
+                maxResults=500,
+                pageToken=page_token,
+            ).execute()
+            message_ids.extend(item["id"] for item in result.get("messages", []))
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        for start in range(0, len(message_ids), 1000):
+            self.service.users().messages().batchModify(
+                userId="me",
+                body={
+                    "ids": message_ids[start : start + 1000],
+                    "removeLabelIds": ["UNREAD"],
+                },
+            ).execute()
+
+        return len(message_ids)
+
+    def star_message(self, message_id: str) -> str:
+        if self.demo_mode:
+            raise RuntimeError("La acción de destacar correos requiere Gmail en modo real.")
+        if self.service is None:
+            raise RuntimeError("Gmail no está conectado; no se destacó ningún correo.")
+
+        self.service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": ["STARRED"]},
+        ).execute()
+        return "Correo destacado con una estrella."
+
     @staticmethod
     def _extract_body(payload: Dict[str, Any]) -> str:
         if payload.get("mimeType", "").startswith("multipart/"):
@@ -144,27 +216,57 @@ class GmailService:
         ]
 
     def create_draft(self, subject: str, body: str) -> str:
+        return self.create_reply_draft(subject=subject, body=body)
+
+    def create_reply_draft(
+        self,
+        subject: str,
+        body: str,
+        recipient: str = "",
+        thread_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        references: Optional[str] = None,
+    ) -> str:
         if self.demo_mode:
             return f"Borrador de prueba creado: {subject}"
 
         if self.service is None:
-            return "No se pudo crear el borrador porque no hay servicio de Gmail configurado."
+            raise RuntimeError("Gmail no está conectado; no se pudo guardar el borrador.")
 
-        account_email = "user@gmail.com"
-        try:
-            profile = self.service.users().getProfile(userId="me").execute()
-            email_address = profile.get("emailAddress")
-            if email_address and "@" in email_address:
-                account_email = email_address
-        except Exception:
-            pass
+        profile = self.service.users().getProfile(userId="me").execute()
+        account_email = profile.get("emailAddress")
+        if not account_email:
+            raise RuntimeError("Gmail no devolvió la dirección de la cuenta autorizada.")
 
         message = EmailMessage()
-        message["To"] = account_email
+        if recipient:
+            message["To"] = recipient
         message["From"] = account_email
         message["Subject"] = subject
+        if message_id:
+            message["In-Reply-To"] = message_id
+            message["References"] = " ".join(filter(None, [references, message_id]))
         message.set_content(body)
 
-        payload = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")}
-        self.service.users().messages().send(userId="me", body=payload).execute()
+        draft_message = {"raw": base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")}
+        if thread_id:
+            draft_message["threadId"] = thread_id
+        self.service.users().drafts().create(
+            userId="me",
+            body={"message": draft_message},
+        ).execute()
         return f"Borrador creado para: {subject}"
+
+    def mark_as_spam(self, message_id: str) -> str:
+        if self.demo_mode:
+            return "Correo de prueba marcado como spam."
+
+        if self.service is None:
+            raise RuntimeError("Gmail no está conectado; no se pudo mover el correo a Spam.")
+
+        self.service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": ["SPAM"], "removeLabelIds": ["INBOX"]},
+        ).execute()
+        return "Correo movido a Spam."
