@@ -1,7 +1,7 @@
-__pycache__/
-.pytest_cache/
-.venv/
 .env
 credentials.json
 token.json
+token.json_pycache_/
+.pytest_cache/
+.venv/
 *.pyc
